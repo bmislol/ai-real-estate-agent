@@ -14,3 +14,4 @@ __pycache__/
 data/*.csv
 models/*.joblib
 node_modules/
+models/*.pkl
