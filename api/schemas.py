@@ -40,3 +40,21 @@ class FeatureExtractionResponse(BaseModel):
     missing_features: List[str] = Field(
         description="A list of the exact feature names that were NOT found in the user's query."
     )
+
+class InterpretationData(BaseModel):
+    """Structured breakdown of the AI's price interpretation."""
+    price_context: str = Field(
+        description="Explanation of whether the predicted price is high, low, or average compared to the baseline market."
+    )
+    key_driving_factors: List[str] = Field(
+        description="Top 3 features from the user's query that most heavily influenced this specific price."
+    )
+    market_comparison: str = Field(
+        description="A brief narrative comparing this property against the provided median market statistics."
+    )
+
+class CombinedResponse(BaseModel):
+    """The final payload sent back to the UI (Step 9 Requirement)."""
+    features_used: PropertyFeatures = Field(description="The exact features fed into the ML model.")
+    predicted_price: float = Field(description="The raw dollar output from the Random Forest model.")
+    interpretation: InterpretationData = Field(description="The LLM's Stage 2 analysis of the prediction.")
