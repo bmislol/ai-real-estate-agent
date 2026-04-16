@@ -2,24 +2,62 @@ import os
 import streamlit as st
 import requests
 from dotenv import load_dotenv
+from supabase import create_client, Client
 
-# The URL where your FastAPI server is running
+# ==========================================
+# 0. Setup & Database Connection
+# ==========================================
 load_dotenv()
-
 API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/predict")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-st.set_page_config(page_title="AI Real Estate Agent", page_icon="🏠", layout="centered")
+st.set_page_config(page_title="AI Real Estate Agent", page_icon="🏠", layout="wide") # Changed to wide layout for the sidebar
+
+# Initialize Supabase client (Cached so it doesn't reconnect on every button click)
+@st.cache_resource
+def init_db() -> Client:
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
+
+supabase = init_db()
 
 # ==========================================
-# 1. State Management (The App's Memory)
+# 1. State Management & Helper Functions
 # ==========================================
-if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {
-            "role": "assistant", 
-            "content": "🏠 **Welcome!** Describe the property you are looking to price in plain English.\n\n*Supported Neighborhoods:* `Edwards`, `CollgCr`, `NoRidge`, `NridgHt`, `OldTown`, `Somerst`, `Mitchel`, `NAmes`, `NWAmes`, `Sawyer`, `Timber`, `Gilbert`, `ClearCr`, `Crawfor`, `BrkSide`, `IDOTRR`, `MeadowV`, `SWISU`, `StoneBr`, `Veenker`, `Blmngtn`, `BrDale`, `NPkVill`, `Blueste`.\n\n*(e.g., 'I have a 1-story house in Edwards with 2 baths')*"
-        }
-    ]
+WELCOME_MSG = "🏠 **Welcome!** Describe the property you are looking to price in plain English.\n\n*Supported Neighborhoods:* `Edwards`, `CollgCr`, `NoRidge`, `NridgHt`, `OldTown`, `Somerst`, `Mitchel`, `NAmes`, `NWAmes`, `Sawyer`, `Timber`, `Gilbert`, `ClearCr`, `Crawfor`, `BrkSide`, `IDOTRR`, `MeadowV`, `SWISU`, `StoneBr`, `Veenker`, `Blmngtn`, `BrDale`, `NPkVill`, `Blueste`.\n\n*(e.g., 'I have a 1-story house in Edwards with 2 baths')*"
+
+def create_new_chat():
+    """Creates a new chat in the DB and resets the UI state."""
+    # Insert a new folder into the 'chats' table
+    response = supabase.table("chats").insert({"title": "New Property Valuation"}).execute()
+    new_chat_id = response.data[0]['id']
+    
+    # Save the welcome message to the 'messages' table
+    supabase.table("messages").insert({"chat_id": new_chat_id, "role": "assistant", "content": WELCOME_MSG}).execute()
+    
+    # Update Streamlit's memory
+    st.session_state.current_chat_id = new_chat_id
+    st.session_state.awaiting_form = False
+    st.session_state.missing_features = []
+    st.session_state.original_query = ""
+
+def save_message(role: str, content: str):
+    """Saves a single message to the DB."""
+    supabase.table("messages").insert({
+        "chat_id": st.session_state.current_chat_id, 
+        "role": role, 
+        "content": content
+    }).execute()
+
+# Initialize the very first chat if they just opened the app
+if "current_chat_id" not in st.session_state:
+    # Check if they have ANY past chats
+    existing_chats = supabase.table("chats").select("id").order("created_at", desc=True).limit(1).execute()
+    if existing_chats.data:
+        st.session_state.current_chat_id = existing_chats.data[0]['id']
+    else:
+        create_new_chat()
+
 if "awaiting_form" not in st.session_state:
     st.session_state.awaiting_form = False
 if "missing_features" not in st.session_state:
@@ -28,29 +66,46 @@ if "original_query" not in st.session_state:
     st.session_state.original_query = ""
 
 # ==========================================
-# 2. UI Layout: The Chat Interface
+# 2. Sidebar Layout (Chat History)
+# ==========================================
+with st.sidebar:
+    st.title("Conversations")
+    if st.button("➕ New Valuation", use_container_width=True):
+        create_new_chat()
+        st.rerun()
+        
+    st.divider()
+    
+    # Fetch all past chats from the DB to show in the sidebar
+    chats_res = supabase.table("chats").select("id, title").order("created_at", desc=True).execute()
+    for chat in chats_res.data:
+        # If they click an old chat, load it!
+        if st.button(f"🏠 {chat['title']}", key=chat['id'], use_container_width=True):
+            st.session_state.current_chat_id = chat['id']
+            st.session_state.awaiting_form = False # Reset form state when switching chats
+            st.rerun()
+
+# ==========================================
+# 3. Main Chat Interface
 # ==========================================
 st.title("🏠 AI Real Estate Agent")
 st.markdown("---")
 
-# Display the chat history
-for msg in st.session_state.messages:
+# Fetch and display all messages for the CURRENTLY selected chat
+messages_res = supabase.table("messages").select("role, content").eq("chat_id", st.session_state.current_chat_id).order("created_at").execute()
+for msg in messages_res.data:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
 # ==========================================
-# 3. UI Layout: The Fallback Form
+# 4. Fallback Form Logic
 # ==========================================
 if st.session_state.awaiting_form:
     st.info("I found some of the details, but I need a little more information to run the pricing model:")
     
     with st.form("missing_data_form"):
         form_answers = {}
-        
-        # Human-Readable Form Generation
         for feature in st.session_state.missing_features:
-            
-            # 1. Numerical Inputs
             if feature == "overall_qual":
                 form_answers[feature] = st.slider("Overall Quality (1 = Poor, 10 = Excellent)", 1, 10, 5)
             elif feature == "full_bath":
@@ -61,8 +116,6 @@ if st.session_state.awaiting_form:
                 form_answers[feature] = st.number_input("Lot Frontage (Linear Feet)", min_value=0, step=5)
             elif feature == "year_built":
                 form_answers[feature] = st.number_input("Year Built", min_value=1800, max_value=2026, step=1)
-                
-            # 2. Categorical Dropdowns (Human Readable!)
             elif feature == "exter_qual":
                 form_answers[feature] = st.selectbox("Exterior Quality", ["Excellent", "Good", "Typical/Average", "Fair", "Poor"])
             elif feature == "bsmt_qual":
@@ -79,25 +132,21 @@ if st.session_state.awaiting_form:
         submit_button = st.form_submit_button("Submit Details")
         
         if submit_button:
-            # We stitch the human-readable answers together for the LLM
             clarification_text = ". ".join([f"The {k.replace('_', ' ')} is {v}" for k, v in form_answers.items()])
             combined_query = st.session_state.original_query + ". " + clarification_text
             
-            st.session_state.messages.append({"role": "user", "content": "*(Submitted missing form data)*"})
+            # SAVE to DB instead of just Streamlit memory
+            save_message("user", "*(Submitted missing form data)*")
             
             with st.spinner("Analyzing complete data and predicting price..."):
                 response = requests.post(API_URL, json={"text": combined_query})
-                
+            
             if response.status_code == 200:
                 data = response.json()
-                
-                # THE FIX: Check if the LLM STILL thinks we are missing data!
                 if "missing_features" in data:
                     st.warning("Hmm, some of that data still wasn't quite right. Let's try again.")
                     st.session_state.missing_features = data["missing_features"]
-                    st.rerun() # Refresh the form to try again
-                
-                # If we finally have a perfect prediction, show it!
+                    st.rerun() 
                 else:
                     price = data.get("predicted_price", 0)
                     interpretation = data.get("interpretation", {})
@@ -107,46 +156,37 @@ if st.session_state.awaiting_form:
                     final_msg += f"**Key Drivers:** {', '.join(interpretation.get('key_driving_factors', []))}\n\n"
                     final_msg += f"**Market Comparison:** {interpretation.get('market_comparison', '')}"
                     
-                    st.session_state.messages.append({"role": "assistant", "content": final_msg})
-                    st.session_state.awaiting_form = False # Close the form
+                    # SAVE to DB
+                    save_message("assistant", final_msg)
+                    st.session_state.awaiting_form = False 
                     st.rerun()
             else:
-                # Try to extract the exact error message from FastAPI
                 try:
                     error_msg = response.json().get("detail", response.text)
                 except:
                     error_msg = response.text
-                st.session_state.messages.append({"role": "assistant", "content": f"⚠️ API Error: {error_msg}"})
+                
+                # SAVE error to DB
+                save_message("assistant", f"⚠️ API Error: {error_msg}")
                 st.session_state.awaiting_form = False
                 st.rerun()
 
 # ==========================================
-# 4. Initial User Input (The Chat Bar)
+# 5. Initial User Input (The Chat Bar)
 # ==========================================
-# Only show the chat bar if we are NOT waiting for them to fill out a form
-elif prompt := st.chat_input("E.g., I want a 1-story house in CollgCr..."):
-    # Save what they typed
-    st.session_state.original_query = prompt
-    st.session_state.messages.append({"role": "user", "content": prompt})
+# Check if the LAST message in the DB was from the user. If so, we need to process it!
+if messages_res.data and messages_res.data[-1]["role"] == "user" and not st.session_state.awaiting_form and messages_res.data[-1]["content"] != "*(Submitted missing form data)*":
+    latest_user_prompt = messages_res.data[-1]["content"]
     
-    # Display it immediately
-    with st.chat_message("user"):
-        st.markdown(prompt)
-        
     with st.spinner("Extracting features..."):
-        # Hit your FastAPI server
-        response = requests.post(API_URL, json={"text": prompt})
+        response = requests.post(API_URL, json={"text": latest_user_prompt})
         
         if response.status_code == 200:
             data = response.json()
-            
-            # Check if FastAPI hit the "is_complete: False" block
             if "missing_features" in data:
                 st.session_state.missing_features = data["missing_features"]
                 st.session_state.awaiting_form = True
-                st.rerun() # Refresh the page to show the form
-            
-            # Otherwise, FastAPI gave us a perfect price immediately!
+                st.rerun() 
             else:
                 price = data.get("predicted_price", 0)
                 interpretation = data.get("interpretation", {})
@@ -156,12 +196,17 @@ elif prompt := st.chat_input("E.g., I want a 1-story house in CollgCr..."):
                 final_msg += f"**Key Drivers:** {', '.join(interpretation.get('key_driving_factors', []))}\n\n"
                 final_msg += f"**Market Comparison:** {interpretation.get('market_comparison', '')}"
                 
-                st.session_state.messages.append({"role": "assistant", "content": final_msg})
+                save_message("assistant", final_msg)
                 st.rerun()
         else:
             try:
                 error_msg = response.json().get("detail", response.text)
             except:
                 error_msg = response.text
-            st.session_state.messages.append({"role": "assistant", "content": f"⚠️ API Error: {error_msg}"})
+            save_message("assistant", f"⚠️ API Error: {error_msg}")
             st.rerun()
+
+elif prompt := st.chat_input("E.g., I want a 1-story house in CollgCr..."):
+    st.session_state.original_query = prompt
+    save_message("user", prompt)
+    st.rerun()
