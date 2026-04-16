@@ -47,10 +47,26 @@ async def predict_property_price(query: UserQuery):
         print(f"Processing query: {query.text}")
         extraction: FeatureExtractionResponse = extract_features(query.text)
         
+        # --- QoL FIX: Validate Neighborhoods ---
+        VALID_NEIGHBORHOODS = [
+            "Blmngtn", "Blueste", "BrDale", "BrkSide", "ClearCr", "CollgCr", 
+            "Crawfor", "Edwards", "Gilbert", "IDOTRR", "MeadowV", "Mitchel", 
+            "NAmes", "NoRidge", "NPkVill", "NridgHt", "NWAmes", "OldTown", 
+            "SWISU", "Sawyer", "SawyerW", "Somerst", "StoneBr", "Timber", "Veenker"
+        ]
+        
+        # If the LLM found a neighborhood, but it's not in our training data list...
+        if extraction.extracted_features.neighborhood and extraction.extracted_features.neighborhood not in VALID_NEIGHBORHOODS:
+            extraction.extracted_features.neighborhood = None # Erase the bad guess
+            if "neighborhood" not in extraction.missing_features:
+                extraction.missing_features.append("neighborhood")
+            extraction.is_complete = False
+        # ---------------------------------------
+
         # If the user forgot information, stop the chain and ask them for it!
         if not extraction.is_complete:
             print("Extraction incomplete. Asking user for missing features.")
-            return extraction # Returns the FeatureExtractionResponse with the missing_features list
+            return extraction
         
         # ==========================================
         # STAGE 1.5: Machine Learning Prediction
@@ -58,12 +74,26 @@ async def predict_property_price(query: UserQuery):
         print("Extraction complete. Running ML Prediction...")
         
         # Convert the Pydantic model into a dictionary, then into a 1-row Pandas DataFrame
-        # Our pipeline expects a DataFrame so the ColumnTransformer can route the columns correctly
         features_dict = extraction.extracted_features.model_dump()
         input_df = pd.DataFrame([features_dict])
         
+        # --- THE FIX: Rename snake_case columns to PascalCase for Scikit-Learn ---
+        column_mapping = {
+            "neighborhood": "Neighborhood",
+            "house_style": "HouseStyle",
+            "garage_type": "GarageType",
+            "exter_qual": "ExterQual",
+            "bsmt_qual": "BsmtQual",
+            "overall_qual": "OverallQual",
+            "gr_liv_area": "GrLivArea",
+            "lot_frontage": "LotFrontage",
+            "year_built": "YearBuilt",
+            "full_bath": "FullBath"
+        }
+        input_df = input_df.rename(columns=column_mapping)
+        # -----------------------------------------------------------------------
+        
         # Predict the price using our saved Random Forest model
-        # The model outputs an array of predictions, so we grab the first one [0]
         prediction_array = ml_model.predict(input_df)
         predicted_price = float(prediction_array[0])
         
